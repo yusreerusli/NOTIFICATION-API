@@ -179,7 +179,7 @@ function checkAuth(req: express.Request, res: express.Response, next: express.Ne
 // API Server Endpoints
 
 // Token Management Endpoints
-app.get('/api/tokens', (req, res) => {
+app.get(['/api/tokens', '/tokens'], (req, res) => {
   try {
     const list = db.prepare('SELECT * FROM api_tokens ORDER BY created_at DESC').all();
     res.json(list);
@@ -188,7 +188,7 @@ app.get('/api/tokens', (req, res) => {
   }
 });
 
-app.post('/api/tokens', (req, res) => {
+app.post(['/api/tokens', '/tokens'], (req, res) => {
   try {
     const { name, token } = req.body;
     if (!name || typeof name !== 'string' || !name.trim()) {
@@ -218,7 +218,7 @@ app.post('/api/tokens', (req, res) => {
   }
 });
 
-app.delete('/api/tokens/:id', (req, res) => {
+app.delete(['/api/tokens/:id', '/tokens/:id'], (req, res) => {
   try {
     const { id } = req.params;
     const stmt = db.prepare('DELETE FROM api_tokens WHERE id = ?');
@@ -233,7 +233,7 @@ app.delete('/api/tokens/:id', (req, res) => {
 });
 
 // 1. POST - Daily storage (expiring in 24 hours) - Immune to SQL Injection through parametrized queries
-app.post('/api/store/daily', checkAuth, (req, res) => {
+app.post(['/api/store/daily', '/store/daily'], checkAuth, (req, res) => {
   try {
     const { source, snippet, answer, model_used } = req.body;
 
@@ -268,7 +268,7 @@ app.post('/api/store/daily', checkAuth, (req, res) => {
 });
 
 // 2. POST - Permanent storage
-app.post('/api/store/permanent', checkAuth, (req, res) => {
+app.post(['/api/store/permanent', '/store/permanent'], checkAuth, (req, res) => {
   try {
     const { source, snippet, answer, model_used } = req.body;
 
@@ -303,7 +303,7 @@ app.post('/api/store/permanent', checkAuth, (req, res) => {
 });
 
 // 3. GET - Retrieve daily records
-app.get('/api/retrieve/daily', checkAuth, (req, res) => {
+app.get(['/api/retrieve/daily', '/retrieve/daily'], checkAuth, (req, res) => {
   try {
     // Explicit clean-up run to ensure fresh results
     cleanupExpiredDaily();
@@ -322,7 +322,7 @@ app.get('/api/retrieve/daily', checkAuth, (req, res) => {
 });
 
 // 4. GET - Retrieve permanent records
-app.get('/api/retrieve/permanent', checkAuth, (req, res) => {
+app.get(['/api/retrieve/permanent', '/retrieve/permanent'], checkAuth, (req, res) => {
   try {
     const fetchStmt = db.prepare(`
       SELECT * FROM policy_answers 
@@ -338,7 +338,7 @@ app.get('/api/retrieve/permanent', checkAuth, (req, res) => {
 });
 
 // 5. GET - System stats & integrity (Powers the High Density live telemetry UI safely)
-app.get('/api/status', (req, res) => {
+app.get(['/api/status', '/status'], (req, res) => {
   try {
     const dailyCount = (db.prepare("SELECT COUNT(*) as c FROM policy_answers WHERE store_type = 'daily'").get() as any).c;
     const permanentCount = (db.prepare("SELECT COUNT(*) as c FROM policy_answers WHERE store_type = 'permanent'").get() as any).c;
@@ -373,7 +373,7 @@ app.get('/api/status', (req, res) => {
 });
 
 // 6. POST - Trigger manual clean-up/restart/reset simulation
-app.post('/api/action/reverify', (req, res) => {
+app.post(['/api/action/reverify', '/action/reverify'], (req, res) => {
   try {
     cleanupExpiredDaily();
     const integrity = verifyDatabaseIntegrity();
@@ -384,7 +384,7 @@ app.post('/api/action/reverify', (req, res) => {
 });
 
 // 7. POST - Dynamic simulation of dropping database and re-seeding
-app.post('/api/action/reset', (req, res) => {
+app.post(['/api/action/reset', '/action/reset'], (req, res) => {
   try {
     db.exec('DELETE FROM policy_answers');
     db.exec('DELETE FROM api_tokens');

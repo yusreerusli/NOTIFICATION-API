@@ -50,6 +50,46 @@ interface ServerStatus {
   uptime: number;
 }
 
+// Robust utility for copying text to clipboard inside iframe sandbox environments
+const copyTextToClipboard = async (text: string): Promise<boolean> => {
+  let success = false;
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      success = true;
+    } catch (err) {
+      console.warn('navigator.clipboard.writeText failed, using fallback copy mechanism.', err);
+    }
+  }
+
+  if (!success) {
+    try {
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      // Configure styling to prevent layout shift or page scroll disruptions
+      textArea.style.position = 'fixed';
+      textArea.style.top = '0';
+      textArea.style.left = '0';
+      textArea.style.width = '2em';
+      textArea.style.height = '2em';
+      textArea.style.padding = '0';
+      textArea.style.border = 'none';
+      textArea.style.outline = 'none';
+      textArea.style.boxShadow = 'none';
+      textArea.style.background = 'transparent';
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      
+      success = document.execCommand('copy');
+      document.body.removeChild(textArea);
+    } catch (err) {
+      console.error('Fallback execCommand copy failed.', err);
+    }
+  }
+  return success;
+};
+
 export default function App() {
   // Navigation & Filtering
   const [selectedEndpoint, setSelectedEndpoint] = useState<'all' | 'daily' | 'permanent'>('all');
@@ -70,7 +110,7 @@ export default function App() {
   const [status, setStatus] = useState<ServerStatus>({
     dbFile: 'policy_store.db',
     dbSize: 12288,
-    appVersion: '1.0.7',
+    appVersion: '1.0.8',
     dailyCount: 0,
     permanentCount: 0,
     isIntegrityOk: true,
@@ -353,8 +393,8 @@ export default function App() {
     }
   };
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
+  const copyToClipboard = async (text: string) => {
+    await copyTextToClipboard(text);
     setCopiedCode(true);
     setTimeout(() => setCopiedCode(false), 2000);
   };
@@ -557,9 +597,9 @@ export default function App() {
                       <div className="flex gap-1 shrink-0">
                         <button 
                           type="button"
-                          onClick={(e) => {
+                          onClick={async (e) => {
                             e.stopPropagation();
-                            navigator.clipboard.writeText(tok.token);
+                            await copyTextToClipboard(tok.token);
                             setCopiedTokenIndex(i);
                             setTimeout(() => setCopiedTokenIndex(null), 1500);
                           }}
