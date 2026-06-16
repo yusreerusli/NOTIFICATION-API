@@ -1,0 +1,6 @@
+{
+  "name": "Policy Answer DB Store",
+  "description": "API and UI for temporary (24 hours) or permanent storage of doc policy answers in an SQLite database.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
