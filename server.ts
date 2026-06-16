@@ -3,7 +3,6 @@ import path from 'path';
 import fs from 'fs';
 import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
-import { createServer as createViteServer } from 'vite';
 
 dotenv.config();
 
@@ -302,6 +301,49 @@ app.post(['/api/store/permanent', '/store/permanent'], checkAuth, (req, res) => 
   }
 });
 
+// 2b. POST - Replace storage (always replaces the entry so only 1 record exists at any point)
+app.post(['/api/store/replace', '/store/replace'], checkAuth, (req, res) => {
+  try {
+    const { source, snippet, answer, model_used } = req.body;
+
+    if (!answer || typeof answer !== 'string') {
+      return res.status(400).json({ error: 'Missing or invalid required "answer" field.' });
+    }
+
+    const deleteStmt = db.prepare("DELETE FROM policy_answers WHERE store_type = 'replace'");
+    const insertStmt = db.prepare(`
+      INSERT INTO policy_answers (source, snippet, answer, model_used, store_type, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    let result: Database.RunResult;
+    db.transaction(() => {
+      deleteStmt.run();
+      result = insertStmt.run(
+        source ? String(source) : null,
+        snippet ? String(snippet) : null,
+        String(answer),
+        model_used ? String(model_used) : null,
+        'replace',
+        Date.now()
+      );
+    })();
+
+    // Verify integrity after any write modification as requested
+    verifyDatabaseIntegrity();
+
+    res.status(201).json({
+      success: true,
+      id: result!.lastInsertRowid,
+      store_type: 'replace',
+      message: 'Record saved successfully, replacing any previous single replace storage entry.'
+    });
+  } catch (error: any) {
+    console.error('Error in /api/store/replace:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
 // 3. GET - Retrieve daily records
 app.get(['/api/retrieve/daily', '/retrieve/daily'], checkAuth, (req, res) => {
   try {
@@ -337,11 +379,28 @@ app.get(['/api/retrieve/permanent', '/retrieve/permanent'], checkAuth, (req, res
   }
 });
 
+// 4b. GET - Retrieve replace records
+app.get(['/api/retrieve/replace', '/retrieve/replace'], checkAuth, (req, res) => {
+  try {
+    const fetchStmt = db.prepare(`
+      SELECT * FROM policy_answers 
+      WHERE store_type = 'replace' 
+      ORDER BY created_at DESC
+    `);
+    const records = fetchStmt.all();
+    res.json(records);
+  } catch (error: any) {
+    console.error('Error in /api/retrieve/replace:', error);
+    res.status(500).json({ error: 'Failed to retrieve replace records', details: error.message });
+  }
+});
+
 // 5. GET - System stats & integrity (Powers the High Density live telemetry UI safely)
 app.get(['/api/status', '/status'], (req, res) => {
   try {
     const dailyCount = (db.prepare("SELECT COUNT(*) as c FROM policy_answers WHERE store_type = 'daily'").get() as any).c;
     const permanentCount = (db.prepare("SELECT COUNT(*) as c FROM policy_answers WHERE store_type = 'permanent'").get() as any).c;
+    const replaceCount = (db.prepare("SELECT COUNT(*) as c FROM policy_answers WHERE store_type = 'replace'").get() as any).c;
     
     let dbSize = 0;
     try {
@@ -363,6 +422,7 @@ app.get(['/api/status', '/status'], (req, res) => {
       appVersion,
       dailyCount,
       permanentCount,
+      replaceCount,
       isIntegrityOk: verifyDatabaseIntegrity(),
       memoryUsage: Math.round(process.memoryUsage().heapUsed / 1024 / 1024 * 10) / 10,
       uptime: Math.round((Date.now() - startTime) / 1000)
@@ -399,13 +459,7 @@ const startTime = Date.now();
 
 // React SPA delivery and HMR handling
 async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa'
-    });
-    app.use(vite.middlewares);
-  } else {
+  if (process.env.NODE_ENV === 'production' || fs.existsSync(path.resolve('dist'))) {
     // Serve from Vite static production builds
     const distPath = path.resolve('dist');
     if (fs.existsSync(distPath)) {
@@ -413,8 +467,22 @@ async function startServer() {
       app.get('*', (req, res) => {
         res.sendFile(path.resolve(distPath, 'index.html'));
       });
+      console.log('[Storage Engine Manager] Running in PRODUCTION Mode (serving static files)');
     } else {
       console.warn('Production "dist" folder not found. Please compile/build before running in production.');
+    }
+  } else {
+    // Development mode with dynamic Vite loading
+    try {
+      const { createServer } = await import('vite');
+      const vite = await createServer({
+        server: { middlewareMode: true },
+        appType: 'spa'
+      });
+      app.use(vite.middlewares);
+      console.log('[Storage Engine Manager] Running in DEVELOPMENT Mode with hot-reloading');
+    } catch (err: any) {
+      console.error('Failed to start Vite dev server, serving fallback or check build:', err);
     }
   }
 

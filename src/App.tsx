@@ -28,7 +28,7 @@ interface PolicyAnswerRecord {
   snippet: string | null;
   answer: string;
   model_used: string | null;
-  store_type: 'daily' | 'permanent';
+  store_type: 'daily' | 'permanent' | 'replace';
   created_at: number; // Epoc Milliseconds
 }
 
@@ -45,6 +45,7 @@ interface ServerStatus {
   appVersion: string;
   dailyCount: number;
   permanentCount: number;
+  replaceCount: number;
   isIntegrityOk: boolean;
   memoryUsage: number;
   uptime: number;
@@ -92,7 +93,7 @@ const copyTextToClipboard = async (text: string): Promise<boolean> => {
 
 export default function App() {
   // Navigation & Filtering
-  const [selectedEndpoint, setSelectedEndpoint] = useState<'all' | 'daily' | 'permanent'>('all');
+  const [selectedEndpoint, setSelectedEndpoint] = useState<'all' | 'daily' | 'permanent' | 'replace'>('all');
   
   // Stored Database Records & Tokens
   const [records, setRecords] = useState<PolicyAnswerRecord[]>([]);
@@ -110,9 +111,10 @@ export default function App() {
   const [status, setStatus] = useState<ServerStatus>({
     dbFile: 'policy_store.db',
     dbSize: 12288,
-    appVersion: '1.0.8',
+    appVersion: '1.0.9',
     dailyCount: 0,
     permanentCount: 0,
+    replaceCount: 0,
     isIntegrityOk: true,
     memoryUsage: 35.5,
     uptime: 0
@@ -123,7 +125,7 @@ export default function App() {
   const [payloadSnippet, setPayloadSnippet] = useState('Source Document: TR-POL-008 Desktop and Notebook Usage Policy.docx Section: USAGE POLICY Content: Al... \n--- \nSource Document: TR-POL-006 Internet and E-mail Security Policy.docx Section: POLICY STATEMENT Conte...');
   const [payloadAnswer, setPayloadAnswer] = useState("TRI-E DAILY DO'S AND DONT'S REMINDER  \nDO'S :  \nUse company-approved system access forms for all work-related activities (Reference: Desktop and Notebook Usage Policy)  \n\nDON'T:  \nSend personal emails or use non-business-related internet services (Reference: Internet and E-mail Security Policy)");
   const [payloadModel, setPayloadModel] = useState('qwen3:8b');
-  const [payloadTarget, setPayloadTarget] = useState<'daily' | 'permanent'>('daily');
+  const [payloadTarget, setPayloadTarget] = useState<'daily' | 'permanent' | 'replace'>('daily');
 
   // Logs & API responses
   const [apiResponse, setApiResponse] = useState<any>(null);
@@ -154,22 +156,27 @@ export default function App() {
         headers['Authorization'] = `Bearer ${selectedTokenKey}`;
       }
 
-      const [dailyRes, permRes, statusRes] = await Promise.all([
+      const [dailyRes, permRes, replaceRes, statusRes] = await Promise.all([
         fetch('/api/retrieve/daily', { headers }),
         fetch('/api/retrieve/permanent', { headers }),
+        fetch('/api/retrieve/replace', { headers }),
         fetch('/api/status')
       ]);
 
       let dailyData = [];
       let permData = [];
+      let replaceData = [];
       
       // Check for authentication failures gracefully
       if (dailyRes.ok) dailyData = await dailyRes.json();
       if (permRes.ok) permData = await permRes.json();
+      if (replaceRes.ok) replaceData = await replaceRes.json();
       const statusData = await statusRes.json();
 
       // Merge records for display
-      const allRecords = Array.isArray(dailyData) && Array.isArray(permData) ? [...dailyData, ...permData] : [];
+      const allRecords = Array.isArray(dailyData) && Array.isArray(permData) && Array.isArray(replaceData)
+        ? [...dailyData, ...permData, ...replaceData] 
+        : [];
       allRecords.sort((a, b) => b.created_at - a.created_at);
       setRecords(allRecords);
       setStatus(statusData);
@@ -326,6 +333,9 @@ export default function App() {
     if (record.store_type === 'permanent') {
       return <span className="text-slate-400 font-medium">INDEFINITE</span>;
     }
+    if (record.store_type === 'replace') {
+      return <span className="text-purple-600 font-bold uppercase text-[9px] tracking-wider leading-none">REPLACE SINGLE</span>;
+    }
     const age = Date.now() - record.created_at;
     const timeLeft = 24 * 60 * 60 * 1000 - age;
 
@@ -379,7 +389,7 @@ export default function App() {
           return `// Request Body Schema (POST /api/store/${payloadTarget})\n${payloadStr}`;
       }
     } else {
-      const endpointUrl = `${origin}/api/retrieve/${payloadTarget === 'daily' ? 'daily' : 'permanent'}`;
+      const endpointUrl = `${origin}/api/retrieve/${payloadTarget}`;
       switch (activeCodeTab) {
         case 'curl':
           return `curl -X GET "${endpointUrl}" \\\n  -H "Authorization: Bearer ${bearer}"`;
@@ -388,7 +398,7 @@ export default function App() {
         case 'python':
           return `import requests\n\nurl = "${endpointUrl}"\nheaders = {\n    "Authorization": "Bearer ${bearer}"\n}\n\nresponse = requests.get(url, headers=headers)\nprint(response.json())`;
         case 'json':
-          return `// Response Schema (GET /api/retrieve/${payloadTarget === 'daily' ? 'daily' : 'permanent'})\n[\n  {\n    "id": 1,\n    "source": "${payloadSource.slice(0, 30)}...",\n    "snippet": "${payloadSnippet.slice(0, 30)}...",\n    "answer": "${payloadAnswer.replace(/\n/g, '\\n').slice(0, 30)}...",\n    "model_used": "${payloadModel}",\n    "store_type": "${payloadTarget}",\n    "created_at": ${Date.now()}\n  }\n]`;
+          return `// Response Schema (GET /api/retrieve/${payloadTarget})\n[\n  {\n    "id": 1,\n    "source": "${payloadSource.slice(0, 30)}...",\n    "snippet": "${payloadSnippet.slice(0, 30)}...",\n    "answer": "${payloadAnswer.replace(/\n/g, '\\n').slice(0, 30)}...",\n    "model_used": "${payloadModel}",\n    "store_type": "${payloadTarget}",\n    "created_at": ${Date.now()}\n  }\n]`;
       }
     }
   };
@@ -522,6 +532,40 @@ export default function App() {
                     <span className="text-[10px] font-mono">/retrieve/permanent</span>
                   </div>
                   <span className="bg-slate-100 px-1 py-0.5 rounded text-[9px] font-mono text-slate-500">{status.permanentCount}</span>
+                </div>
+              </div>
+
+              {/* Endpoint Set 3: Single Replace Entry */}
+              <div className="pt-1.5">
+                <div className="px-1 py-0.5 text-[9px] font-bold text-purple-600 tracking-wider font-sans">SINGLE REPLACE ENTRY</div>
+                <div 
+                  onClick={() => { setSelectedEndpoint('replace'); setPayloadTarget('replace'); }}
+                  className={`cursor-pointer transition-all flex items-center justify-between gap-1.5 px-2.5 py-1.5 border rounded shadow-sm hover:shadow-md mb-1 ${
+                    selectedEndpoint === 'replace' 
+                      ? 'bg-amber-50 border-amber-300 ring-2 ring-amber-100 text-slate-950 font-bold' 
+                      : 'bg-white border-slate-200 hover:bg-slate-100 text-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[8px] font-bold bg-amber-100 text-amber-700 px-1 py-0.5 rounded leading-none">POST</span>
+                    <span className="text-[10px] font-mono">/store/replace</span>
+                  </div>
+                  <span className="bg-slate-100 px-1 py-0.5 rounded text-[9px] font-mono text-slate-500">{status.replaceCount || 0}</span>
+                </div>
+
+                <div 
+                  onClick={() => setSelectedEndpoint('replace')}
+                  className={`cursor-pointer transition-all flex items-center justify-between gap-1.5 px-2.5 py-1.5 border rounded shadow-sm hover:shadow-md ${
+                    selectedEndpoint === 'replace' 
+                      ? 'bg-blue-50 border-blue-300 ring-2 ring-blue-100 text-slate-950 font-bold' 
+                      : 'bg-white border-slate-200 hover:bg-slate-100 text-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[8px] font-bold bg-blue-100 text-blue-700 px-1 py-0.5 rounded leading-none">GET</span>
+                    <span className="text-[10px] font-mono">/retrieve/replace</span>
+                  </div>
+                  <span className="bg-slate-100 px-1 py-0.5 rounded text-[9px] font-mono text-slate-500">{status.replaceCount || 0}</span>
                 </div>
               </div>
 
@@ -691,8 +735,8 @@ export default function App() {
                 <div className="space-y-1.5 flex-1 select-none pr-1">
                   <div>
                     <label className="block text-[9px] font-bold text-slate-500 uppercase">Target Endpoint (Storage Scope)</label>
-                    <div className="grid grid-cols-2 gap-2 mt-1">
-                      <label className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded border text-xs cursor-pointer ${
+                    <div className="grid grid-cols-3 gap-1.5 mt-1">
+                      <label className={`flex items-center gap-1 px-1.5 py-1.5 rounded border text-[10px] sm:text-xs cursor-pointer ${
                         payloadTarget === 'daily' 
                           ? 'bg-amber-50 border-amber-300 text-amber-900 font-bold' 
                           : 'bg-white border-slate-200'
@@ -704,9 +748,9 @@ export default function App() {
                           onChange={() => setPayloadTarget('daily')}
                           className="text-indigo-600"
                         />
-                        <span>Daily (Destructs in 24h)</span>
+                        <span>Daily (24h)</span>
                       </label>
-                      <label className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded border text-xs cursor-pointer ${
+                      <label className={`flex items-center gap-1 px-1.5 py-1.5 rounded border text-[10px] sm:text-xs cursor-pointer ${
                         payloadTarget === 'permanent' 
                           ? 'bg-rose-50 border-rose-300 text-rose-900 font-bold' 
                           : 'bg-white border-slate-200'
@@ -718,7 +762,21 @@ export default function App() {
                           onChange={() => setPayloadTarget('permanent')}
                           className="text-indigo-600"
                         />
-                        <span>Permanent Compliance</span>
+                        <span>Permanent</span>
+                      </label>
+                      <label className={`flex items-center gap-1 px-1.5 py-1.5 rounded border text-[10px] sm:text-xs cursor-pointer ${
+                        payloadTarget === 'replace' 
+                          ? 'bg-purple-50 border-purple-300 text-purple-900 font-bold' 
+                          : 'bg-white border-slate-200'
+                      }`}>
+                        <input 
+                          type="radio" 
+                          name="target" 
+                          checked={payloadTarget === 'replace'} 
+                          onChange={() => setPayloadTarget('replace')}
+                          className="text-indigo-600"
+                        />
+                        <span>Replace</span>
                       </label>
                     </div>
                   </div>
@@ -911,6 +969,12 @@ export default function App() {
                   >
                     Permanent
                   </button>
+                  <button 
+                    onClick={() => setSelectedEndpoint('replace')}
+                    className={`px-2 py-0.5 rounded text-[10px] font-semibold ${selectedEndpoint === 'replace' ? 'bg-purple-650 text-white bg-purple-600 hover:bg-purple-700 text-white' : 'bg-slate-200 hover:bg-slate-300 text-slate-700'}`}
+                  >
+                    Replace
+                  </button>
                 </div>
               </div>
 
@@ -939,7 +1003,11 @@ export default function App() {
                         <tr 
                           key={rec.id} 
                           className={`hover:bg-indigo-50/50 transition-colors ${
-                            rec.store_type === 'permanent' ? 'bg-rose-50/5' : 'bg-amber-50/5'
+                            rec.store_type === 'permanent' 
+                              ? 'bg-rose-50/5' 
+                              : rec.store_type === 'replace'
+                                ? 'bg-purple-50/5'
+                                : 'bg-amber-50/5'
                           }`}
                         >
                           <td className="px-3 py-2 text-center text-slate-400 font-bold border-r border-slate-100 bg-slate-50/20 text-[10px]">
@@ -969,7 +1037,9 @@ export default function App() {
                               <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded tracking-wide border ${
                                 rec.store_type === 'permanent' 
                                   ? 'bg-rose-100 text-rose-800 border-rose-200' 
-                                  : 'bg-amber-100 text-amber-800 border-amber-200'
+                                  : rec.store_type === 'replace'
+                                    ? 'bg-purple-100 text-purple-800 border-purple-200'
+                                    : 'bg-amber-100 text-amber-800 border-amber-200'
                               }`}>
                                 {rec.store_type.toUpperCase()}
                               </span>
