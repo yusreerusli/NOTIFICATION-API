@@ -60,6 +60,13 @@ db.exec(`
     store_type TEXT NOT NULL, -- 'daily' or 'permanent'
     created_at INTEGER NOT NULL -- epoch timestamp
   );
+
+  CREATE TABLE IF NOT EXISTS api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+  );
 `);
 
 // Verify integrity immediately after creation/load
@@ -86,6 +93,19 @@ setInterval(cleanupExpiredDaily, 5 * 60 * 1000);
 // Database Seeding Logic (maintain startup seeding as requested)
 function seedDatabase() {
   cleanupExpiredDaily();
+  
+  // Seed default developer API authorization token
+  try {
+    const tokensCount = (db.prepare('SELECT COUNT(*) as count FROM api_tokens').get() as any).count;
+    if (tokensCount === 0) {
+      console.log('[Database Seeding] Creating default developer API token...');
+      db.prepare('INSERT INTO api_tokens (name, token, created_at) VALUES (?, ?, ?)')
+        .run('Default Dev Key', 'policy_tok_dev_master_6fb2a0', Date.now());
+    }
+  } catch (err) {
+    console.error('Failed to seed authentication tokens:', err);
+  }
+
   const countStmt = db.prepare('SELECT COUNT(*) as count FROM policy_answers');
   const { count } = countStmt.get() as { count: number };
 
@@ -122,10 +142,98 @@ function seedDatabase() {
 
 seedDatabase();
 
+// Authentication Token verification middleware
+function checkAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const authHeader = req.headers.authorization;
+  const apiKeyHeader = req.headers['x-api-key'];
+  
+  let tokenToValidate = '';
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    tokenToValidate = authHeader.substring(7);
+  } else if (apiKeyHeader) {
+    tokenToValidate = String(apiKeyHeader);
+  }
+
+  try {
+    const tokensCount = (db.prepare('SELECT COUNT(*) as c FROM api_tokens').get() as any).c;
+    if (tokensCount === 0) {
+      // If no tokens exist, bypass checks dynamically to make testing easy
+      return next();
+    }
+    
+    if (!tokenToValidate) {
+      return res.status(401).json({ error: 'Unauthorized: Missing API token. Please specify header "Authorization: Bearer <token>" or "x-api-key: <token>".' });
+    }
+    
+    const validToken = db.prepare('SELECT * FROM api_tokens WHERE token = ?').get(tokenToValidate);
+    if (!validToken) {
+      return res.status(401).json({ error: 'Unauthorized: Invalid API token.' });
+    }
+    
+    next();
+  } catch (error: any) {
+    res.status(500).json({ error: 'Authorization verification failed', details: error.message });
+  }
+}
+
 // API Server Endpoints
 
+// Token Management Endpoints
+app.get('/api/tokens', (req, res) => {
+  try {
+    const list = db.prepare('SELECT * FROM api_tokens ORDER BY created_at DESC').all();
+    res.json(list);
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to retrieve API tokens.', details: err.message });
+  }
+});
+
+app.post('/api/tokens', (req, res) => {
+  try {
+    const { name, token } = req.body;
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Missing or invalid required string "name" field.' });
+    }
+    
+    // Generate secure token string if none specified
+    const generatedToken = token && typeof token === 'string' && token.trim()
+      ? token.trim()
+      : 'policy_tok_' + Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
+
+    const insert = db.prepare('INSERT INTO api_tokens (name, token, created_at) VALUES (?, ?, ?)');
+    const result = insert.run(name.trim(), generatedToken, Date.now());
+    
+    res.status(201).json({
+      success: true,
+      id: result.lastInsertRowid,
+      name: name.trim(),
+      token: generatedToken,
+      created_at: Date.now()
+    });
+  } catch (err: any) {
+    if (err.message && err.message.includes('UNIQUE')) {
+      return res.status(400).json({ error: 'Token string must be unique.' });
+    }
+    res.status(500).json({ error: 'Failed to register API token.', details: err.message });
+  }
+});
+
+app.delete('/api/tokens/:id', (req, res) => {
+  try {
+    const { id } = req.params;
+    const stmt = db.prepare('DELETE FROM api_tokens WHERE id = ?');
+    const result = stmt.run(id);
+    if (result.changes === 0) {
+      return res.status(404).json({ error: 'Requested API token not found.' });
+    }
+    res.json({ success: true, message: 'API token successfully revoked.' });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to revoke token', details: err.message });
+  }
+});
+
 // 1. POST - Daily storage (expiring in 24 hours) - Immune to SQL Injection through parametrized queries
-app.post('/api/store/daily', (req, res) => {
+app.post('/api/store/daily', checkAuth, (req, res) => {
   try {
     const { source, snippet, answer, model_used } = req.body;
 
@@ -160,7 +268,7 @@ app.post('/api/store/daily', (req, res) => {
 });
 
 // 2. POST - Permanent storage
-app.post('/api/store/permanent', (req, res) => {
+app.post('/api/store/permanent', checkAuth, (req, res) => {
   try {
     const { source, snippet, answer, model_used } = req.body;
 
@@ -195,7 +303,7 @@ app.post('/api/store/permanent', (req, res) => {
 });
 
 // 3. GET - Retrieve daily records
-app.get('/api/retrieve/daily', (req, res) => {
+app.get('/api/retrieve/daily', checkAuth, (req, res) => {
   try {
     // Explicit clean-up run to ensure fresh results
     cleanupExpiredDaily();
@@ -214,7 +322,7 @@ app.get('/api/retrieve/daily', (req, res) => {
 });
 
 // 4. GET - Retrieve permanent records
-app.get('/api/retrieve/permanent', (req, res) => {
+app.get('/api/retrieve/permanent', checkAuth, (req, res) => {
   try {
     const fetchStmt = db.prepare(`
       SELECT * FROM policy_answers 
@@ -279,6 +387,7 @@ app.post('/api/action/reverify', (req, res) => {
 app.post('/api/action/reset', (req, res) => {
   try {
     db.exec('DELETE FROM policy_answers');
+    db.exec('DELETE FROM api_tokens');
     seedDatabase();
     res.json({ success: true, message: 'Database reset and default seeds loaded.' });
   } catch (err: any) {

@@ -13,10 +13,15 @@ import {
   CheckCircle2, 
   ShieldAlert, 
   Info,
-  ExternalLink
+  ExternalLink,
+  Key,
+  Copy,
+  Check,
+  Code,
+  FileCode
 } from 'lucide-react';
 
-// Define database record structure
+// Define database structures
 interface PolicyAnswerRecord {
   id: number;
   source: string | null;
@@ -25,6 +30,13 @@ interface PolicyAnswerRecord {
   model_used: string | null;
   store_type: 'daily' | 'permanent';
   created_at: number; // Epoc Milliseconds
+}
+
+interface ApiToken {
+  id: number;
+  name: string;
+  token: string;
+  created_at: number;
 }
 
 interface ServerStatus {
@@ -42,14 +54,23 @@ export default function App() {
   // Navigation & Filtering
   const [selectedEndpoint, setSelectedEndpoint] = useState<'all' | 'daily' | 'permanent'>('all');
   
-  // Stored Database Records
+  // Stored Database Records & Tokens
   const [records, setRecords] = useState<PolicyAnswerRecord[]>([]);
+  const [tokens, setTokens] = useState<ApiToken[]>([]);
+  const [selectedTokenKey, setSelectedTokenKey] = useState<string>('');
+  const [newTokenName, setNewTokenName] = useState<string>('');
   
+  // Dynamic Tab Selector for API Examples
+  const [activeCodeTab, setActiveCodeTab] = useState<'curl' | 'fetch' | 'python' | 'json'>('curl');
+  const [activeCodeAction, setActiveCodeAction] = useState<'post' | 'get'>('post');
+  const [copiedCode, setCopiedCode] = useState(false);
+  const [copiedTokenIndex, setCopiedTokenIndex] = useState<number | null>(null);
+
   // Live Telemetry / Server Stats
   const [status, setStatus] = useState<ServerStatus>({
     dbFile: 'policy_store.db',
     dbSize: 12288,
-    appVersion: '1.0.5', // Compliance with version increment per build
+    appVersion: '1.0.7',
     dailyCount: 0,
     permanentCount: 0,
     isIntegrityOk: true,
@@ -69,21 +90,46 @@ export default function App() {
   const [apiResponseStatus, setApiResponseStatus] = useState<'idle' | 'success' | 'error' | 'loading'>('idle');
   const [validationError, setValidationError] = useState<string | null>(null);
 
-  // Load and refresh state
+  // Fetch API authorization keys list
+  const fetchTokens = async () => {
+    try {
+      const res = await fetch('/api/tokens');
+      const data = await res.json();
+      setTokens(data);
+      if (data.length > 0 && !selectedTokenKey) {
+        // Automatically select the first option as active
+        setSelectedTokenKey(data[0].token);
+      }
+    } catch (err) {
+      console.error('Failed to load api tokens:', err);
+    }
+  };
+
+  // Load and refresh state with secure tokens
   const fetchData = async () => {
     try {
+      // Build call headers dynamically
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (selectedTokenKey) {
+        headers['Authorization'] = `Bearer ${selectedTokenKey}`;
+      }
+
       const [dailyRes, permRes, statusRes] = await Promise.all([
-        fetch('/api/retrieve/daily'),
-        fetch('/api/retrieve/permanent'),
+        fetch('/api/retrieve/daily', { headers }),
+        fetch('/api/retrieve/permanent', { headers }),
         fetch('/api/status')
       ]);
 
-      const dailyData = await dailyRes.json();
-      const permData = await permRes.json();
+      let dailyData = [];
+      let permData = [];
+      
+      // Check for authentication failures gracefully
+      if (dailyRes.ok) dailyData = await dailyRes.json();
+      if (permRes.ok) permData = await permRes.json();
       const statusData = await statusRes.json();
 
       // Merge records for display
-      const allRecords = [...dailyData, ...permData];
+      const allRecords = Array.isArray(dailyData) && Array.isArray(permData) ? [...dailyData, ...permData] : [];
       allRecords.sort((a, b) => b.created_at - a.created_at);
       setRecords(allRecords);
       setStatus(statusData);
@@ -92,11 +138,16 @@ export default function App() {
     }
   };
 
+  // Run on mount, token change, or interval polling
+  useEffect(() => {
+    fetchTokens();
+  }, []);
+
   useEffect(() => {
     fetchData();
     const interval = setInterval(fetchData, 4000); // Poll status every 4 seconds
     return () => clearInterval(interval);
-  }, []);
+  }, [selectedTokenKey]);
 
   // Post Payload Handler
   const handleExecutePost = async (e: React.FormEvent) => {
@@ -116,9 +167,14 @@ export default function App() {
     };
 
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (selectedTokenKey) {
+        headers['Authorization'] = `Bearer ${selectedTokenKey}`;
+      }
+
       const res = await fetch(`/api/store/${payloadTarget}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(payload)
       });
 
@@ -134,6 +190,51 @@ export default function App() {
     } catch (err: any) {
       setApiResponseStatus('error');
       setApiResponse({ error: 'Network failure', details: err.message });
+    }
+  };
+
+  // Create new active API Token
+  const handleCreateToken = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTokenName.trim()) return;
+    try {
+      const res = await fetch('/api/tokens', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newTokenName.trim() })
+      });
+      if (res.ok) {
+        const addedToken = await res.json();
+        setNewTokenName('');
+        await fetchTokens();
+        setSelectedTokenKey(addedToken.token);
+        setApiResponseStatus('success');
+        setApiResponse({ success: true, message: 'New API Auth Token successfully registered.', token: addedToken.token });
+      } else {
+        const errData = await res.json();
+        alert(errData.error || 'Failed to create token');
+      }
+    } catch (err: any) {
+      console.error(err);
+    }
+  };
+
+  // Revoke active API Token
+  const handleDeleteToken = async (id: number, tokenValue: string) => {
+    if (window.confirm('Are you sure you want to revoke this Authentication Token? Any API clients currently deploying it will receive immediate 401 Unauthorized exceptions.')) {
+      try {
+        const res = await fetch(`/api/tokens/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          if (selectedTokenKey === tokenValue) {
+            setSelectedTokenKey('');
+          }
+          await fetchTokens();
+          setApiResponseStatus('success');
+          setApiResponse({ success: true, message: 'Authorization Token revoked.' });
+        }
+      } catch (err) {
+        console.error(err);
+      }
     }
   };
 
@@ -157,6 +258,7 @@ export default function App() {
         const data = await res.json();
         setApiResponseStatus('success');
         setApiResponse(data);
+        fetchTokens();
         fetchData();
       } catch (err) {
         console.error(err);
@@ -195,8 +297,8 @@ export default function App() {
     const minutes = Math.floor((timeLeft % (60 * 60 * 1000)) / (60 * 1000));
 
     return (
-      <span className="text-amber-600 font-extrabold flex items-center justify-end gap-1 font-mono">
-        <Clock className="w-3 h-3 text-amber-500 animate-pulse" />
+      <span className="text-amber-600 font-extrabold flex items-center justify-end gap-1 font-mono text-[10px]">
+        <Clock className="w-2.5 h-2.5 text-amber-500 animate-pulse" />
         {hours}h {minutes}m
       </span>
     );
@@ -210,6 +312,52 @@ export default function App() {
 
   // Calculate live format for DB Size in KB/MB
   const formattedDbSize = (status.dbSize / 1024).toFixed(1);
+
+  // Dynamic code example snippets assembler
+  const getCodeSnippet = () => {
+    const origin = window.location.origin;
+    const bearer = selectedTokenKey || 'policy_tok_YOUR_TOKEN';
+    
+    // Ingest data model
+    const payloadStr = JSON.stringify({
+      source: payloadSource || null,
+      snippet: payloadSnippet || null,
+      answer: payloadAnswer,
+      model_used: payloadModel || null
+    }, null, 2);
+
+    if (activeCodeAction === 'post') {
+      const endpointUrl = `${origin}/api/store/${payloadTarget}`;
+      switch (activeCodeTab) {
+        case 'curl':
+          return `curl -X POST "${endpointUrl}" \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${bearer}" \\\n  -d '${payloadStr.replace(/'/g, "'\\''")}'`;
+        case 'fetch':
+          return `fetch("${endpointUrl}", {\n  method: "POST",\n  headers: {\n    "Content-Type": "application/json",\n    "Authorization": "Bearer ${bearer}"\n  },\n  body: JSON.stringify(${payloadStr.split('\n').map((l, i) => i === 0 ? l : '    ' + l).join('\n')})\n})\n.then(res => res.json())\n.then(data => console.log(data));`;
+        case 'python':
+          return `import requests\n\nurl = "${endpointUrl}"\nheaders = {\n    "Content-Type": "application/json",\n    "Authorization": "Bearer ${bearer}"\n}\npayload = ${JSON.stringify(JSON.parse(payloadStr), null, 4).replace(/null/g, 'None')}\n\nresponse = requests.post(url, headers=headers, json=payload)\nprint(response.json())`;
+        case 'json':
+          return `// Request Body Schema (POST /api/store/${payloadTarget})\n${payloadStr}`;
+      }
+    } else {
+      const endpointUrl = `${origin}/api/retrieve/${payloadTarget === 'daily' ? 'daily' : 'permanent'}`;
+      switch (activeCodeTab) {
+        case 'curl':
+          return `curl -X GET "${endpointUrl}" \\\n  -H "Authorization: Bearer ${bearer}"`;
+        case 'fetch':
+          return `fetch("${endpointUrl}", {\n  method: "GET",\n  headers: {\n    "Authorization": "Bearer ${bearer}"\n  }\n})\n.then(res => res.json())\n.then(data => console.log(data));`;
+        case 'python':
+          return `import requests\n\nurl = "${endpointUrl}"\nheaders = {\n    "Authorization": "Bearer ${bearer}"\n}\n\nresponse = requests.get(url, headers=headers)\nprint(response.json())`;
+        case 'json':
+          return `// Response Schema (GET /api/retrieve/${payloadTarget === 'daily' ? 'daily' : 'permanent'})\n[\n  {\n    "id": 1,\n    "source": "${payloadSource.slice(0, 30)}...",\n    "snippet": "${payloadSnippet.slice(0, 30)}...",\n    "answer": "${payloadAnswer.replace(/\n/g, '\\n').slice(0, 30)}...",\n    "model_used": "${payloadModel}",\n    "store_type": "${payloadTarget}",\n    "created_at": ${Date.now()}\n  }\n]`;
+      }
+    }
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedCode(true);
+    setTimeout(() => setCopiedCode(false), 2000);
+  };
 
   return (
     <div className="w-full min-h-screen bg-slate-100 text-slate-800 font-sans flex items-center justify-center p-2 sm:p-4">
@@ -258,89 +406,91 @@ export default function App() {
         {/* Main Content Layout */}
         <main className="flex-1 flex flex-col lg:flex-row overflow-hidden min-h-[500px]">
           
-          {/* Sidebar Area: Endpoint Controls */}
-          <aside className="w-full lg:w-72 border-b lg:border-b-0 lg:border-r border-slate-200 bg-slate-50 flex flex-col shrink-0">
-            <div className="p-4 border-b border-slate-200 bg-slate-100/50">
+          {/* Sidebar Area: Endpoint Controls & Token Manager */}
+          <aside className="w-full lg:w-76 border-b lg:border-b-0 lg:border-r border-slate-200 bg-slate-50 flex flex-col shrink-0 overflow-y-auto">
+            {/* API Endpoints Navigator */}
+            <div className="p-3 border-b border-slate-200 bg-slate-100/50">
               <h2 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1">
                 <Terminal className="w-3 text-slate-400" />
                 Endpoints Configured
               </h2>
             </div>
             
-            <div className="p-3 space-y-3 flex flex-col sm:flex-row lg:flex-col gap-2 sm:gap-0">
+            <div className="p-3 space-y-2">
               {/* Endpoint Set 1: Daily Persistence */}
-              <div className="flex-1">
-                <div className="px-2 py-1 text-[10px] font-bold text-indigo-600 tracking-wider">DAILY PERSISTENCE (24H)</div>
+              <div>
+                <div className="px-1 py-0.5 text-[9px] font-bold text-indigo-600 tracking-wider">DAILY PERSISTENCE (24H)</div>
                 <div 
                   onClick={() => { setSelectedEndpoint('daily'); setPayloadTarget('daily'); }}
-                  className={`cursor-pointer transition-all flex items-center justify-between gap-2 px-3 py-2 border rounded shadow-sm hover:shadow-md mb-1 ${
+                  className={`cursor-pointer transition-all flex items-center justify-between gap-1.5 px-2.5 py-1.5 border rounded shadow-sm hover:shadow-md mb-1 ${
                     selectedEndpoint === 'daily' 
                       ? 'bg-amber-50 border-amber-300 ring-2 ring-amber-100 text-slate-950 font-bold' 
                       : 'bg-white border-slate-200 hover:bg-slate-100 text-slate-700'
                   }`}
                 >
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] font-bold bg-amber-100 text-amber-700 px-1 py-0.5 rounded">POST</span>
-                    <span className="text-[11px] font-mono">/store/daily</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[8px] font-bold bg-amber-100 text-amber-700 px-1 py-0.5 rounded leading-none">POST</span>
+                    <span className="text-[10px] font-mono">/store/daily</span>
                   </div>
-                  <span className="bg-slate-100 px-1.5 py-0.5 rounded text-[10px] font-mono text-slate-500">{status.dailyCount}</span>
+                  <span className="bg-slate-100 px-1 py-0.5 rounded text-[9px] font-mono text-slate-500">{status.dailyCount}</span>
                 </div>
 
                 <div 
                   onClick={() => setSelectedEndpoint('daily')}
-                  className={`cursor-pointer transition-all flex items-center justify-between gap-2 px-3 py-2 border rounded shadow-sm hover:shadow-md ${
+                  className={`cursor-pointer transition-all flex items-center justify-between gap-1.5 px-2.5 py-1.5 border rounded shadow-sm hover:shadow-md ${
                     selectedEndpoint === 'daily' 
                       ? 'bg-blue-50 border-blue-300 ring-2 ring-blue-100 text-slate-950 font-bold' 
                       : 'bg-white border-slate-200 hover:bg-slate-100 text-slate-700'
                   }`}
                 >
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] font-bold bg-blue-100 text-blue-700 px-1 py-0.5 rounded">GET</span>
-                    <span className="text-[11px] font-mono">/retrieve/daily</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[8px] font-bold bg-blue-100 text-blue-700 px-1 py-0.5 rounded leading-none">GET</span>
+                    <span className="text-[10px] font-mono">/retrieve/daily</span>
                   </div>
-                  <span className="bg-slate-100 px-1.5 py-0.5 rounded text-[10px] font-mono text-slate-500">{status.dailyCount}</span>
+                  <span className="bg-slate-100 px-1 py-0.5 rounded text-[9px] font-mono text-slate-500">{status.dailyCount}</span>
                 </div>
               </div>
 
               {/* Endpoint Set 2: Permanent Storage */}
-              <div className="flex-1 lg:mt-2">
-                <div className="px-2 py-1 text-[10px] font-bold text-rose-600 tracking-wider">INDEFINITE STORAGE</div>
+              <div className="pt-1.5">
+                <div className="px-1 py-0.5 text-[9px] font-bold text-rose-600 tracking-wider font-sans">INDEFINITE COMPLIANCE</div>
                 <div 
                   onClick={() => { setSelectedEndpoint('permanent'); setPayloadTarget('permanent'); }}
-                  className={`cursor-pointer transition-all flex items-center justify-between gap-2 px-3 py-2 border rounded shadow-sm hover:shadow-md mb-1 ${
+                  className={`cursor-pointer transition-all flex items-center justify-between gap-1.5 px-2.5 py-1.5 border rounded shadow-sm hover:shadow-md mb-1 ${
                     selectedEndpoint === 'permanent' 
                       ? 'bg-amber-50 border-amber-300 ring-2 ring-amber-100 text-slate-950 font-bold' 
                       : 'bg-white border-slate-200 hover:bg-slate-100 text-slate-700'
                   }`}
                 >
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] font-bold bg-amber-100 text-amber-700 px-1 py-0.5 rounded">POST</span>
-                    <span className="text-[11px] font-mono">/store/permanent</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[8px] font-bold bg-amber-100 text-amber-700 px-1 py-0.5 rounded leading-none">POST</span>
+                    <span className="text-[10px] font-mono">/store/permanent</span>
                   </div>
-                  <span className="bg-slate-100 px-1.5 py-0.5 rounded text-[10px] font-mono text-slate-500">{status.permanentCount}</span>
+                  <span className="bg-slate-100 px-1 py-0.5 rounded text-[9px] font-mono text-slate-500">{status.permanentCount}</span>
                 </div>
 
                 <div 
                   onClick={() => setSelectedEndpoint('permanent')}
-                  className={`cursor-pointer transition-all flex items-center justify-between gap-2 px-3 py-2 border rounded shadow-sm hover:shadow-md ${
+                  className={`cursor-pointer transition-all flex items-center justify-between gap-1.5 px-2.5 py-1.5 border rounded shadow-sm hover:shadow-md ${
                     selectedEndpoint === 'permanent' 
                       ? 'bg-blue-50 border-blue-300 ring-2 ring-blue-100 text-slate-950 font-bold' 
                       : 'bg-white border-slate-200 hover:bg-slate-100 text-slate-700'
                   }`}
                 >
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] font-bold bg-blue-100 text-blue-700 px-1 py-0.5 rounded">GET</span>
-                    <span className="text-[11px] font-mono">/retrieve/permanent</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[8px] font-bold bg-blue-100 text-blue-700 px-1 py-0.5 rounded leading-none">GET</span>
+                    <span className="text-[10px] font-mono">/retrieve/permanent</span>
                   </div>
-                  <span className="bg-slate-100 px-1.5 py-0.5 rounded text-[10px] font-mono text-slate-500">{status.permanentCount}</span>
+                  <span className="bg-slate-100 px-1 py-0.5 rounded text-[9px] font-mono text-slate-500">{status.permanentCount}</span>
                 </div>
               </div>
 
               {/* Show All Filter */}
-              <div className="pt-2">
+              <div className="pt-1.5 border-t border-slate-100">
                 <button 
+                  type="button"
                   onClick={() => setSelectedEndpoint('all')}
-                  className={`w-full py-1.5 px-3 rounded text-[11px] font-bold border transition-all text-center flex items-center justify-center gap-2 ${
+                  className={`w-full py-1 px-2.5 rounded text-[10px] font-bold border transition-all text-center flex items-center justify-center gap-1.5 ${
                     selectedEndpoint === 'all' 
                       ? 'bg-slate-800 text-white border-slate-800' 
                       : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
@@ -352,27 +502,115 @@ export default function App() {
               </div>
             </div>
 
+            {/* API AUTHENTICATION TOKENS (User Request) */}
+            <div className="p-3 border-t border-b border-slate-200 bg-slate-150 mt-1">
+              <h2 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1">
+                <Key className="w-3 text-slate-400" />
+                API AUTH TOKENS
+              </h2>
+            </div>
+
+            <div className="p-3 flex-1 flex flex-col min-h-[160px] gap-2">
+              <form onSubmit={handleCreateToken} className="space-y-1">
+                <div className="flex gap-1">
+                  <input 
+                    type="text"
+                    value={newTokenName}
+                    onChange={(e) => setNewTokenName(e.target.value)}
+                    placeholder="New token nickname..."
+                    className="flex-1 px-2 py-1 bg-white border border-slate-200 rounded text-[10px] font-sans focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    maxLength={32}
+                    required
+                  />
+                  <button 
+                    type="submit"
+                    className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-[9px] font-bold font-sans flex items-center gap-0.5 leading-none shadow-sm shrink-0"
+                  >
+                    <span>GEN</span>
+                  </button>
+                </div>
+              </form>
+
+              {/* Scrollable list of keys */}
+              <div className="flex-1 overflow-y-auto max-h-48 border border-slate-200 rounded bg-white text-[10px] divide-y divide-slate-150">
+                {tokens.length === 0 ? (
+                  <div className="p-3 text-center text-slate-400 italic">No access keys registered.</div>
+                ) : (
+                  tokens.map((tok, i) => (
+                    <div 
+                      key={tok.id}
+                      onClick={() => setSelectedTokenKey(tok.token)}
+                      className={`p-1.5 flex items-center justify-between gap-1 transition-colors cursor-pointer ${
+                        selectedTokenKey === tok.token ? 'bg-indigo-50 text-indigo-950 font-semibold' : 'hover:bg-slate-50'
+                      }`}
+                    >
+                      <div className="min-w-0 select-none">
+                        <div className="flex items-center gap-1">
+                          <div className={`w-1.5 h-1.5 rounded-full ${selectedTokenKey === tok.token ? 'bg-indigo-600' : 'bg-slate-300'}`}></div>
+                          <span className="truncate block font-bold leading-none">{tok.name}</span>
+                        </div>
+                        <span className="text-[9px] text-slate-500 font-mono select-all truncate block mt-0.5">
+                          {tok.token.substring(0, 16)}...
+                        </span>
+                      </div>
+
+                      <div className="flex gap-1 shrink-0">
+                        <button 
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            navigator.clipboard.writeText(tok.token);
+                            setCopiedTokenIndex(i);
+                            setTimeout(() => setCopiedTokenIndex(null), 1500);
+                          }}
+                          className="p-1 hover:bg-slate-200 text-slate-500 hover:text-slate-800 rounded transition-colors"
+                          title="Copy API Token Key"
+                        >
+                          {copiedTokenIndex === i ? (
+                            <Check className="w-3 text-emerald-600" />
+                          ) : (
+                            <Copy className="w-3" />
+                          )}
+                        </button>
+                        <button 
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteToken(tok.id, tok.token);
+                          }}
+                          className="p-1 hover:bg-rose-100 text-slate-400 hover:text-rose-600 rounded transition-colors"
+                          title="Revoke Token"
+                        >
+                          <Trash2 className="w-3" />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
             {/* Simulated Live Storage Stats Bar */}
-            <div className="p-4 mt-auto border-t border-slate-200 bg-white">
+            <div className="p-3 mt-auto border-t border-slate-200 bg-white shrink-0">
               <div className="flex justify-between items-center mb-1">
-                <span className="text-[10px] font-bold text-slate-400 flex items-center gap-1">
+                <span className="text-[9px] font-bold text-slate-400 flex items-center gap-1">
                   <HardDrive className="w-3" />
-                  SQLITE USAGE STATUS
+                  SQLITE INSTANCE
                 </span>
                 <span className="text-[10px] text-slate-600 font-mono font-bold">
                   {formattedDbSize} KB
                 </span>
               </div>
-              <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
+              <div className="w-full bg-slate-250 h-1.5 rounded-full overflow-hidden">
                 <div 
-                  className="bg-indigo-600 h-2 rounded-full transition-all duration-1000" 
+                  className="bg-indigo-600 h-1.5 rounded-full transition-all duration-1000" 
                   style={{ width: `${Math.min(100, Math.max(8, (status.dbSize / 20480) * 100))}%` }}
                 ></div>
               </div>
-              <div className="flex justify-between items-center text-[9px] text-slate-400 mt-1.5">
+              <div className="flex justify-between items-center text-[9px] text-slate-400 mt-1">
                 <span>Auto-indexing Active</span>
-                <button onClick={handleReverify} className="text-indigo-600 hover:underline font-mono">
-                  VERIFY INTEGRITY
+                <button onClick={handleReverify} className="text-indigo-600 hover:underline font-mono text-[9px] font-semibold">
+                  VERIFY
                 </button>
               </div>
             </div>
@@ -513,64 +751,88 @@ export default function App() {
                 </div>
               </form>
 
-              {/* JSON Live Inspector output (Right Side) */}
-              <div className="flex-1 bg-slate-900 flex flex-col overflow-hidden relative">
+              {/* API Client Reference & Examples Panel (Replaced Telemetry Output Panel) */}
+              <div className="flex-1 bg-slate-900 flex flex-col overflow-hidden relative text-slate-100">
                 <div className="px-4 py-2 bg-slate-950 border-b border-slate-800 flex justify-between items-center shrink-0">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                    <Terminal className="w-3 text-indigo-400" />
-                    Telemetry Output Panel
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Code className="w-3 text-indigo-400" />
+                    API CLIENT EXAMPLES
                   </span>
-                  <span className="text-[9px] font-mono text-emerald-400">Content-Type: application/json</span>
-                </div>
-                
-                <div className="flex-1 p-3 font-mono text-[11px] text-emerald-400 overflow-y-auto leading-relaxed">
-                  {apiResponseStatus === 'loading' ? (
-                    <div className="text-indigo-400 blink mt-1 flex items-center gap-2">
-                      <RefreshCw className="w-3 h-3 animate-spin" />
-                      <span>INGESTING PAYLOAD AND DOING INTEGRITY CHECKS...</span>
-                    </div>
-                  ) : apiResponseStatus === 'idle' ? (
-                    <div>
-                      <span className="text-slate-500">// Ready to ingest. Populate the fields and submit.</span>
-                      <pre className="text-indigo-300 mt-2 select-all">
-{`{
-  "source": "${payloadSource.slice(0, 30)}...",
-  "snippet": "${payloadSnippet.slice(0, 30)}...",
-  "answer": "${payloadAnswer.replace(/\n/g, '\\n').slice(0, 45)}...",
-  "model_used": "${payloadModel}"
-}`}
-                      </pre>
-                    </div>
-                  ) : (
-                    <div>
-                      <div className="flex items-center gap-1.5 font-bold mb-1.5">
-                        {apiResponseStatus === 'success' ? (
-                          <>
-                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                            <span className="text-emerald-400 uppercase">HTTP 201 CREATED</span>
-                          </>
-                        ) : (
-                          <>
-                            <ShieldAlert className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-                            <span className="text-rose-400 uppercase font-bold">API ERROR INGESTION</span>
-                          </>
-                        )}
-                      </div>
-                      <pre className="text-slate-200 mt-1 whitespace-pre-wrap select-all">
-                        {JSON.stringify(apiResponse, null, 2)}
-                      </pre>
-                    </div>
-                  )}
+                  
+                  {/* POST / GET Code Action Switcher */}
+                  <div className="flex items-center gap-1 bg-slate-800 px-1 py-0.5 rounded text-[9px]">
+                    <button
+                      type="button"
+                      onClick={() => setActiveCodeAction('post')}
+                      className={`px-1.5 py-0.5 rounded font-semibold ${activeCodeAction === 'post' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+                    >
+                      POST
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveCodeAction('get')}
+                      className={`px-1.5 py-0.5 rounded font-semibold ${activeCodeAction === 'get' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+                    >
+                      GET
+                    </button>
+                  </div>
                 </div>
 
-                <div className="absolute bottom-3 right-3 flex items-center gap-2 pointer-events-none select-none">
-                  {apiResponseStatus === 'success' && (
-                    <div className="bg-emerald-500/15 text-emerald-400 border border-emerald-500/35 px-2 py-0.5 rounded text-[10px] font-mono tracking-tight font-extrabold uppercase animate-bounce">
-                      JSON VALIDATED SAFE
+                {/* Code Tabs */}
+                <div className="flex bg-slate-950 text-[10px] font-mono border-b border-slate-850 shrink-0">
+                  {(['curl', 'fetch', 'python', 'json'] as const).map((tab) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      onClick={() => setActiveCodeTab(tab)}
+                      className={`px-3 py-1.5 font-bold tracking-tight border-b-2 transition-colors ${
+                        activeCodeTab === tab 
+                          ? 'border-indigo-500 text-indigo-400 bg-slate-900' 
+                          : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
+                      }`}
+                    >
+                      {tab === 'curl' ? 'cURL' : tab === 'fetch' ? 'Fetch API' : tab === 'python' ? 'Python' : 'Payload JSON'}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(getCodeSnippet())}
+                    className="ml-auto px-3 py-1.5 text-slate-400 hover:text-white hover:bg-slate-900 flex items-center gap-1 transition-colors text-[9px]"
+                  >
+                    {copiedCode ? (
+                      <>
+                        <Check className="w-3 text-emerald-400 animate-pulse" />
+                        <span className="text-emerald-400 font-bold">COPIED!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3" />
+                        <span>COPY CODE</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+                
+                {/* Scrollable code viewer */}
+                <div className="flex-1 p-3 font-mono text-[10px] text-emerald-400 overflow-y-auto leading-relaxed select-all">
+                  <pre className="whitespace-pre-wrap font-mono select-all break-all selection:bg-slate-700 selection:text-white">
+                    {getCodeSnippet()}
+                  </pre>
+                </div>
+
+                {/* Footer status markers */}
+                <div className="absolute bottom-3 right-3 flex items-center gap-1.5 pointer-events-none select-none">
+                  {selectedTokenKey ? (
+                    <div className="bg-emerald-500/15 text-emerald-400 border border-emerald-500/35 px-1.5 py-0.5 rounded text-[8px] font-mono font-extrabold uppercase tracking-wider">
+                      BEARER SECURED
+                    </div>
+                  ) : (
+                    <div className="bg-amber-500/15 text-amber-400 border border-amber-500/35 px-1.5 py-0.5 rounded text-[8px] font-mono font-extrabold uppercase tracking-wider animate-pulse">
+                      BYPASS DEV AUTH
                     </div>
                   )}
-                  <div className="bg-slate-800 text-slate-400 border border-slate-700 px-2 py-0.5 rounded text-[9px] font-mono">
-                    SQL_SECURE: PASS
+                  <div className="bg-slate-800 text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded text-[8px] font-mono font-extrabold">
+                    SQL_ESCAPE: CONFIRMED
                   </div>
                 </div>
               </div>
